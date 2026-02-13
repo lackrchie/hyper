@@ -1,20 +1,26 @@
-//!  Server connection API.
-//!
-//! The types in this module are to provide a lower-level API based around a
-//! single connection. Accepting a connection and binding it with a service
-//! are not handled at this level. This module provides the building blocks to
-//! customize those things externally.
-//!
-//! This module is split by HTTP version, providing a connection builder for
-//! each. They work similarly, but they each have specific options.
-//!
-//! If your server needs to support both versions, an auto-connection builder is
-//! provided in the [`hyper-util`](https://github.com/hyperium/hyper-util/tree/master)
-//! crate. This builder wraps the HTTP/1 and HTTP/2 connection builders from this
-//! module, allowing you to set configuration for both. The builder will then check
-//! the version of the incoming connection and serve it accordingly.
+// ============================================================================
+// 服务器连接 API 模块
+// ============================================================================
+// 本模块中的类型提供了基于单个连接的低层 API。
+// 接受连接和将其与服务绑定不在此层处理。
+// 本模块提供的是用于在外部自定义这些操作的构建块。
+//
+// 本模块按 HTTP 版本划分，为每个版本提供一个连接构建器。
+// 它们的工作方式类似，但各自有特定的选项。
+//
+// 如果你的服务器需要同时支持两个版本，可以使用
+// [`hyper-util`](https://github.com/hyperium/hyper-util/tree/master) crate
+// 中提供的自动连接构建器。该构建器封装了本模块中的 HTTP/1 和 HTTP/2
+// 连接构建器，允许你为两者设置配置。构建器会检查传入连接的版本
+// 并相应地进行处理。
+// ============================================================================
 
+/// HTTP/1 服务器连接模块。
+/// 提供 HTTP/1.1 协议的连接处理和配置。
 #[cfg(feature = "http1")]
 pub mod http1;
+
+/// HTTP/2 服务器连接模块。
+/// 提供 HTTP/2 协议的连接处理和配置。
 #[cfg(feature = "http2")]
 pub mod http2;

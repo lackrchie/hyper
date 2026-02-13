@@ -1,7 +1,33 @@
+//! 异步 IO trait 模块
+//!
+//! 本模块定义了 hyper 自己的异步 `Read` 和 `Write` trait，以及配套的
+//! `ReadBuf` 和 `ReadBufCursor` 缓冲区类型。
+//!
+//! ## 为什么 hyper 要定义自己的 IO trait？
+//!
+//! hyper 自定义 IO trait 而非直接使用 tokio 的 `AsyncRead`/`AsyncWrite`，
+//! 主要基于以下设计目标：
+//!
+//! 1. **支持基于轮询（poll-based）的 IO 操作**
+//! 2. **可选的向量化 IO（vectored IO）支持**
+//! 3. **未来可接入缓冲池（buffer pool）**
+//! 4. **为最终的 io-uring 完成式 IO 预留前向兼容性**
+//!
+//! 最后一点是做出此设计决策的核心原因：hyper 希望能够在不破坏 1.0 API
+//! 的前提下，未来支持基于 io-uring 的完成式异步运行时。
+
+// --- 标准库导入 ---
+
+/// 导入格式化 trait，用于实现 `Debug`
 use std::fmt;
+/// 导入 `MaybeUninit`，用于表示可能未初始化的内存区域
+/// 这是 `ReadBuf` 能够高效处理未初始化缓冲区的关键类型
 use std::mem::MaybeUninit;
+/// 导入 `DerefMut` trait，用于为 `Pin<P>` 等智能指针类型实现 Read/Write
 use std::ops::DerefMut;
+/// 导入 `Pin`，用于固定自引用类型，确保异步轮询方法中的安全性
 use std::pin::Pin;
+/// 导入异步任务上下文 `Context` 和轮询结果 `Poll`
 use std::task::{Context, Poll};
 
 // New IO traits? What?! Why, are you bonkers?
@@ -22,15 +48,15 @@ use std::task::{Context, Poll};
 // allow even the "slow" path to be faster, such as if someone didn't remember
 // to forward along an `is_completion` call.
 
-/// Reads bytes from a source.
+/// 异步字节读取 trait。
 ///
-/// This trait is similar to `std::io::Read`, but supports asynchronous reads.
+/// 此 trait 类似于 `std::io::Read`，但支持异步读取操作。
+/// 它是 hyper 中所有 IO 读取操作的基础抽象。
 ///
-/// # Implementing `Read`
+/// # 实现 `Read`
 ///
-/// Implementations should read data into the provided [`ReadBufCursor`] and
-/// advance the cursor to indicate how many bytes were written. The simplest
-/// and safest approach is to use [`ReadBufCursor::put_slice`]:
+/// 实现者应将数据读入提供的 [`ReadBufCursor`] 并推进游标以指示写入了多少字节。
+/// 最简单、最安全的方式是使用 [`ReadBufCursor::put_slice`]：
 ///
 /// ```
 /// use hyper::rt::{Read, ReadBufCursor};
@@ -67,20 +93,17 @@ use std::task::{Context, Poll};
 /// }
 /// ```
 ///
-/// For more advanced use cases where you need direct access to the buffer
-/// (e.g., when interfacing with APIs that write directly to a pointer),
-/// you can use the unsafe [`ReadBufCursor::as_mut`] and [`ReadBufCursor::advance`]
-/// methods. See their documentation for safety requirements.
+/// 对于更高级的使用场景（如需要直接访问缓冲区，或与直接写入指针的 API 交互），
+/// 可以使用 unsafe 的 [`ReadBufCursor::as_mut`] 和 [`ReadBufCursor::advance`] 方法。
+/// 请参阅它们的文档了解安全性要求。
 pub trait Read {
-    /// Attempts to read bytes into the `buf`.
+    /// 尝试将字节读入 `buf`。
     ///
-    /// On success, returns `Poll::Ready(Ok(()))` and places data in the
-    /// unfilled portion of `buf`. If no data was read (`buf.remaining()` is
-    /// unchanged), it implies that EOF has been reached.
+    /// 成功时返回 `Poll::Ready(Ok(()))`，并将数据放入 `buf` 的未填充部分。
+    /// 如果没有读取到数据（`buf.remaining()` 未变），则表示已到达 EOF。
     ///
-    /// If no data is available for reading, the method returns `Poll::Pending`
-    /// and arranges for the current task (via `cx.waker()`) to receive a
-    /// notification when the object becomes readable or is closed.
+    /// 如果当前没有数据可读，方法返回 `Poll::Pending`，
+    /// 并安排当前任务（通过 `cx.waker()`）在对象可读或关闭时收到通知。
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -88,55 +111,60 @@ pub trait Read {
     ) -> Poll<Result<(), std::io::Error>>;
 }
 
-/// Write bytes asynchronously.
+/// 异步字节写入 trait。
 ///
-/// This trait is similar to `std::io::Write`, but for asynchronous writes.
+/// 此 trait 类似于 `std::io::Write`，但支持异步写入操作。
+/// 它是 hyper 中所有 IO 写入操作的基础抽象。
 pub trait Write {
-    /// Attempt to write bytes from `buf` into the destination.
+    /// 尝试将 `buf` 中的字节写入目标。
     ///
-    /// On success, returns `Poll::Ready(Ok(num_bytes_written)))`. If
-    /// successful, it must be guaranteed that `n <= buf.len()`. A return value
-    /// of `0` means that the underlying object is no longer able to accept
-    /// bytes, or that the provided buffer is empty.
+    /// 成功时返回 `Poll::Ready(Ok(num_bytes_written))`。
+    /// 保证 `n <= buf.len()`。返回值 `0` 表示底层对象不再接受字节，
+    /// 或者提供的缓冲区为空。
     ///
-    /// If the object is not ready for writing, the method returns
-    /// `Poll::Pending` and arranges for the current task (via `cx.waker()`) to
-    /// receive a notification when the object becomes writable or is closed.
+    /// 如果对象尚未准备好写入，方法返回 `Poll::Pending`，
+    /// 并安排当前任务在对象可写或关闭时收到通知。
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>>;
 
-    /// Attempts to flush the object.
+    /// 尝试刷新（flush）此写入器中缓冲的数据。
     ///
-    /// On success, returns `Poll::Ready(Ok(()))`.
-    ///
-    /// If flushing cannot immediately complete, this method returns
-    /// `Poll::Pending` and arranges for the current task (via `cx.waker()`) to
-    /// receive a notification when the object can make progress.
+    /// 成功时返回 `Poll::Ready(Ok(()))`。
+    /// 如果刷新无法立即完成，返回 `Poll::Pending`，
+    /// 并安排当前任务在可以继续时收到通知。
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>>;
 
-    /// Attempts to shut down this writer.
+    /// 尝试关闭（shutdown）此写入器。
+    ///
+    /// 这通常意味着发送 EOF 信号或关闭底层的写入通道。
     fn poll_shutdown(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>>;
 
-    /// Returns whether this writer has an efficient `poll_write_vectored`
-    /// implementation.
+    /// 返回此写入器是否拥有高效的 `poll_write_vectored` 实现。
     ///
-    /// The default implementation returns `false`.
+    /// 默认实现返回 `false`。如果底层 IO 支持高效的向量化写入
+    /// （如 writev 系统调用），实现者应覆盖此方法返回 `true`。
     fn is_write_vectored(&self) -> bool {
         false
     }
 
-    /// Like `poll_write`, except that it writes from a slice of buffers.
+    /// 类似 `poll_write`，但从一组缓冲区切片中写入数据。
+    ///
+    /// 向量化写入（vectored write / scatter-gather IO）可以在一次系统调用中
+    /// 写入多个不连续的缓冲区，减少系统调用次数。
+    ///
+    /// 默认实现会找到第一个非空缓冲区并委托给 `poll_write`。
     fn poll_write_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<Result<usize, std::io::Error>> {
+        // 找到第一个非空的缓冲区切片，如果全部为空则使用空切片
         let buf = bufs
             .iter()
             .find(|b| !b.is_empty())
@@ -145,15 +173,16 @@ pub trait Write {
     }
 }
 
-/// A wrapper around a byte buffer that is incrementally filled and initialized.
+/// 增量填充和初始化的字节缓冲区包装器。
 ///
-/// This type is a sort of "double cursor". It tracks three regions in the
-/// buffer: a region at the beginning of the buffer that has been logically
-/// filled with data, a region that has been initialized at some point but not
-/// yet logically filled, and a region at the end that may be uninitialized.
-/// The filled region is guaranteed to be a subset of the initialized region.
+/// 此类型实现了一种"双游标"机制。它在缓冲区中跟踪三个区域：
+/// - **已填充区域（filled）**：缓冲区开头，已被逻辑填充了数据的区域
+/// - **已初始化但未填充区域（initialized）**：曾被初始化但尚未被逻辑填充的区域
+/// - **未初始化区域（uninitialized）**：缓冲区末尾，可能未被初始化的区域
 ///
-/// In summary, the contents of the buffer can be visualized as:
+/// 已填充区域一定是已初始化区域的子集。
+///
+/// 缓冲区内容的可视化表示：
 ///
 /// ```not_rust
 /// [             capacity              ]
@@ -161,32 +190,35 @@ pub trait Write {
 /// [    initialized    | uninitialized ]
 /// ```
 ///
-/// It is undefined behavior to de-initialize any bytes from the uninitialized
-/// region, since it is merely unknown whether this region is uninitialized or
-/// not, and if part of it turns out to be initialized, it must stay initialized.
+/// 将已知初始化的字节"反初始化"是未定义行为（UB），因为我们只是不确定
+/// 该区域是否已初始化——如果它已被初始化，就必须保持初始化状态。
+///
+/// 这种设计的核心优势在于避免了不必要的零初始化开销：
+/// 传统的 `Vec<u8>` 需要先零初始化再写入，而 `ReadBuf` 允许直接写入
+/// 未初始化的内存，从而减少内存写入次数。
 pub struct ReadBuf<'a> {
+    /// 底层的原始字节切片，使用 `MaybeUninit<u8>` 表示可能未初始化
     raw: &'a mut [MaybeUninit<u8>],
+    /// 已填充的字节数（从缓冲区开头计算）
     filled: usize,
+    /// 已初始化的字节数（从缓冲区开头计算，>= filled）
     init: usize,
 }
 
-/// The cursor part of a [`ReadBuf`], representing the unfilled portion.
+/// [`ReadBuf`] 的游标部分，表示未填充的区域。
 ///
-/// This is created by calling [`ReadBuf::unfilled()`].
+/// 通过调用 [`ReadBuf::unfilled()`] 创建。
 ///
-/// `ReadBufCursor` provides safe and unsafe methods for writing data into the
-/// buffer:
+/// `ReadBufCursor` 提供了安全和不安全两种方式向缓冲区写入数据：
 ///
-/// - **Safe approach**: Use [`put_slice`](Self::put_slice) to copy data from
-///   a slice. This handles initialization tracking and cursor advancement
-///   automatically.
+/// - **安全方式**：使用 [`put_slice`](Self::put_slice) 从切片复制数据。
+///   它会自动处理初始化跟踪和游标推进。
 ///
-/// - **Unsafe approach**: For zero-copy scenarios or when interfacing with
-///   low-level APIs, use [`as_mut`](Self::as_mut) to get a mutable slice
-///   of `MaybeUninit<u8>`, then call [`advance`](Self::advance) after writing.
-///   This is more efficient but requires careful attention to safety invariants.
+/// - **不安全方式**：对于零拷贝场景或与底层 API 交互时，
+///   使用 [`as_mut`](Self::as_mut) 获取 `MaybeUninit<u8>` 的可变切片，
+///   写入后调用 [`advance`](Self::advance)。更高效但需要仔细遵守安全不变量。
 ///
-/// # Example using safe methods
+/// # 安全方法示例
 ///
 /// ```
 /// use hyper::rt::ReadBuf;
@@ -196,14 +228,14 @@ pub struct ReadBuf<'a> {
 ///
 /// {
 ///     let mut cursor = read_buf.unfilled();
-///     // put_slice handles everything safely
+///     // put_slice 安全地处理一切
 ///     cursor.put_slice(b"hello");
 /// }
 ///
 /// assert_eq!(read_buf.filled(), b"hello");
 /// ```
 ///
-/// # Example using unsafe methods
+/// # 不安全方法示例
 ///
 /// ```
 /// use hyper::rt::ReadBuf;
@@ -213,14 +245,14 @@ pub struct ReadBuf<'a> {
 ///
 /// {
 ///     let mut cursor = read_buf.unfilled();
-///     // SAFETY: we will initialize exactly 5 bytes
+///     // SAFETY: 我们将恰好初始化 5 个字节
 ///     let slice = unsafe { cursor.as_mut() };
 ///     slice[0].write(b'h');
 ///     slice[1].write(b'e');
 ///     slice[2].write(b'l');
 ///     slice[3].write(b'l');
 ///     slice[4].write(b'o');
-///     // SAFETY: we have initialized 5 bytes
+///     // SAFETY: 我们已经初始化了 5 个字节
 ///     unsafe { cursor.advance(5) };
 /// }
 ///
@@ -228,23 +260,31 @@ pub struct ReadBuf<'a> {
 /// ```
 #[derive(Debug)]
 pub struct ReadBufCursor<'a> {
+    /// 对 `ReadBuf` 的可变引用，通过它来操作底层缓冲区
     buf: &'a mut ReadBuf<'a>,
 }
 
+/// `ReadBuf` 的方法实现块
 impl<'data> ReadBuf<'data> {
-    /// Create a new `ReadBuf` with a slice of initialized bytes.
+    /// 使用已初始化的字节切片创建新的 `ReadBuf`。
+    ///
+    /// 由于传入的 `&mut [u8]` 已完全初始化，所以 `init` 设为切片长度。
+    /// 内部通过指针转换将 `&mut [u8]` 转为 `&mut [MaybeUninit<u8>]`。
     #[inline]
     pub fn new(raw: &'data mut [u8]) -> Self {
         let len = raw.len();
         Self {
-            // SAFETY: We never de-init the bytes ourselves.
+            // SAFETY: 我们从不反初始化这些字节——只要它们一开始是初始化的，
+            // 将 [u8] 视为 [MaybeUninit<u8>] 是安全的
             raw: unsafe { &mut *(raw as *mut [u8] as *mut [MaybeUninit<u8>]) },
             filled: 0,
             init: len,
         }
     }
 
-    /// Create a new `ReadBuf` with a slice of uninitialized bytes.
+    /// 使用未初始化的字节切片创建新的 `ReadBuf`。
+    ///
+    /// `filled` 和 `init` 都设为 0，因为缓冲区完全未初始化。
     #[inline]
     pub fn uninit(raw: &'data mut [MaybeUninit<u8>]) -> Self {
         Self {
@@ -254,19 +294,27 @@ impl<'data> ReadBuf<'data> {
         }
     }
 
-    /// Get a slice of the buffer that has been filled in with bytes.
+    /// 获取缓冲区中已填充数据的不可变切片引用。
+    ///
+    /// 返回的切片只包含已填充（且已初始化）的数据部分。
     #[inline]
     pub fn filled(&self) -> &[u8] {
-        // SAFETY: We only slice the filled part of the buffer, which is always valid
+        // SAFETY: 只切取 filled 范围内的数据，这部分一定已初始化，
+        // 因此将 [MaybeUninit<u8>] 转为 [u8] 是安全的
         unsafe { &*(&self.raw[0..self.filled] as *const [MaybeUninit<u8>] as *const [u8]) }
     }
 
-    /// Get a cursor to the unfilled portion of the buffer.
+    /// 获取缓冲区未填充部分的游标。
+    ///
+    /// 返回的 `ReadBufCursor` 可用于向缓冲区写入新数据。
+    /// 这里使用了 `unsafe` 的 `transmute` 来缩短生命周期——
+    /// 这是安全的，因为 `ReadBuf` 的内部引用不会被重新赋值。
     #[inline]
     pub fn unfilled<'cursor>(&'cursor mut self) -> ReadBufCursor<'cursor> {
         ReadBufCursor {
-            // SAFETY: self.buf is never re-assigned, so its safe to narrow
-            // the lifetime.
+            // SAFETY: self.buf 不会被重新赋值，所以缩短生命周期是安全的。
+            // 这种生命周期技巧（lifetime trick）确保了 ReadBufCursor 的生命周期
+            // 不会超过 ReadBuf 的可变借用期
             buf: unsafe {
                 std::mem::transmute::<&'cursor mut ReadBuf<'data>, &'cursor mut ReadBuf<'cursor>>(
                     self,
@@ -275,41 +323,60 @@ impl<'data> ReadBuf<'data> {
         }
     }
 
+    /// 设置已初始化的字节数（内部方法，用于 HTTP/2）。
+    ///
+    /// # Safety
+    ///
+    /// 调用者必须确保前 `n` 个字节确实已被初始化。
+    /// 使用 `max` 确保 init 游标只会向前移动，不会后退。
     #[inline]
     #[cfg(all(any(feature = "client", feature = "server"), feature = "http2"))]
     pub(crate) unsafe fn set_init(&mut self, n: usize) {
         self.init = self.init.max(n);
     }
 
+    /// 设置已填充的字节数（内部方法，用于 HTTP/2）。
+    ///
+    /// # Safety
+    ///
+    /// 调用者必须确保前 `n` 个字节确实已被填充（且已初始化）。
+    /// 使用 `max` 确保 filled 游标只会向前移动。
     #[inline]
     #[cfg(all(any(feature = "client", feature = "server"), feature = "http2"))]
     pub(crate) unsafe fn set_filled(&mut self, n: usize) {
         self.filled = self.filled.max(n);
     }
 
+    /// 返回已填充的字节数（内部方法，用于 HTTP/2）
     #[inline]
     #[cfg(all(any(feature = "client", feature = "server"), feature = "http2"))]
     pub(crate) fn len(&self) -> usize {
         self.filled
     }
 
+    /// 返回已初始化的字节数（内部方法，用于 HTTP/2）
     #[inline]
     #[cfg(all(any(feature = "client", feature = "server"), feature = "http2"))]
     pub(crate) fn init_len(&self) -> usize {
         self.init
     }
 
+    /// 返回缓冲区中剩余可用的字节数（容量 - 已填充）
     #[inline]
     fn remaining(&self) -> usize {
         self.capacity() - self.filled
     }
 
+    /// 返回缓冲区的总容量
     #[inline]
     fn capacity(&self) -> usize {
         self.raw.len()
     }
 }
 
+/// 为 `ReadBuf` 实现 `Debug` trait。
+///
+/// 输出 filled、init 和 capacity 三个关键指标，不输出实际数据内容。
 impl fmt::Debug for ReadBuf<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReadBuf")
@@ -320,44 +387,50 @@ impl fmt::Debug for ReadBuf<'_> {
     }
 }
 
+/// `ReadBufCursor` 的方法实现块
 impl ReadBufCursor<'_> {
-    /// Access the unfilled part of the buffer.
+    /// 获取缓冲区未填充部分的可变切片。
     ///
     /// # Safety
     ///
-    /// The caller must not uninitialize any bytes that may have been
-    /// initialized before.
+    /// 调用者不得将之前已初始化的字节反初始化。
+    /// 返回的是 `MaybeUninit<u8>` 切片，写入时应使用 `MaybeUninit::write()` 方法。
     #[inline]
     pub unsafe fn as_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // 返回从 filled 位置开始到缓冲区末尾的切片
         &mut self.buf.raw[self.buf.filled..]
     }
 
-    /// Advance the `filled` cursor by `n` bytes.
+    /// 将 `filled` 游标向前推进 `n` 个字节。
     ///
     /// # Safety
     ///
-    /// The caller must take care that `n` more bytes have been initialized.
+    /// 调用者必须确保已经初始化了额外的 `n` 个字节。
+    /// 使用 `checked_add` 防止整数溢出，并同步更新 `init` 游标。
     #[inline]
     pub unsafe fn advance(&mut self, n: usize) {
+        // checked_add 检测溢出，溢出时 panic
         self.buf.filled = self.buf.filled.checked_add(n).expect("overflow");
+        // 确保 init 至少与 filled 一样大
         self.buf.init = self.buf.filled.max(self.buf.init);
     }
 
-    /// Returns the number of bytes that can be written from the current
-    /// position until the end of the buffer is reached.
+    /// 返回从当前位置到缓冲区末尾的剩余可写字节数。
     ///
-    /// This value is equal to the length of the slice returned by `as_mut()``.
+    /// 此值等于 `as_mut()` 返回的切片长度。
     #[inline]
     pub fn remaining(&self) -> usize {
         self.buf.remaining()
     }
 
-    /// Transfer bytes into `self` from `src` and advance the cursor
-    /// by the number of bytes written.
+    /// 从 `src` 切片将字节复制到缓冲区并推进游标。
+    ///
+    /// 这是向 `ReadBufCursor` 写入数据的推荐安全方法，
+    /// 它会自动处理初始化跟踪和游标推进。
     ///
     /// # Panics
     ///
-    /// `self` must have enough remaining capacity to contain all of `src`.
+    /// 如果 `src` 的长度超过剩余容量，将会 panic。
     #[inline]
     pub fn put_slice(&mut self, src: &[u8]) {
         assert!(
@@ -366,10 +439,11 @@ impl ReadBufCursor<'_> {
         );
 
         let amt = src.len();
-        // Cannot overflow, asserted above
+        // 因为上面的 assert，这里不会溢出
         let end = self.buf.filled + amt;
 
-        // Safety: the length is asserted above
+        // Safety: 长度已在上方断言检查，copy_from_nonoverlapping 用于
+        // 高效的非重叠内存复制
         unsafe {
             self.buf.raw[self.buf.filled..end]
                 .as_mut_ptr()
@@ -377,13 +451,21 @@ impl ReadBufCursor<'_> {
                 .copy_from_nonoverlapping(src.as_ptr(), amt);
         }
 
+        // 更新 init 游标：如果写入的数据超过了之前的初始化范围
         if self.buf.init < end {
             self.buf.init = end;
         }
+        // 更新 filled 游标
         self.buf.filled = end;
     }
 }
 
+// ========== Read trait 的委托实现宏 ==========
+
+/// 为实现了 `Deref` 的包装类型（Box、&mut T）生成 `Read` 的委托实现。
+///
+/// 这是 Rust 中常见的"新类型委托"（newtype delegation）模式：
+/// 通过宏为智能指针和引用类型自动生成 trait 实现，将调用委托给内部类型。
 macro_rules! deref_async_read {
     () => {
         fn poll_read(
@@ -391,19 +473,29 @@ macro_rules! deref_async_read {
             cx: &mut Context<'_>,
             buf: ReadBufCursor<'_>,
         ) -> Poll<std::io::Result<()>> {
+            // 解引用并重新 pin，将调用委托给内部类型
             Pin::new(&mut **self).poll_read(cx, buf)
         }
     };
 }
 
+/// 为 `Box<T>` 实现 `Read`——将调用委托给 `T` 的 `Read` 实现。
+///
+/// `T: ?Sized` 允许 trait object（如 `Box<dyn Read>`）也能工作。
+/// `T: Unpin` 约束允许在 Box 上安全地创建 Pin。
 impl<T: ?Sized + Read + Unpin> Read for Box<T> {
     deref_async_read!();
 }
 
+/// 为 `&mut T` 实现 `Read`——将调用委托给 `T` 的 `Read` 实现
 impl<T: ?Sized + Read + Unpin> Read for &mut T {
     deref_async_read!();
 }
 
+/// 为 `Pin<P>` 实现 `Read`——处理双重 Pin 的情况。
+///
+/// 当 `P` 实现了 `DerefMut` 且 `P::Target` 实现了 `Read` 时，
+/// `Pin<P>` 也实现 `Read`。这允许 `Pin<Box<dyn Read>>` 等类型工作。
 impl<P> Read for Pin<P>
 where
     P: DerefMut,
@@ -414,10 +506,16 @@ where
         cx: &mut Context<'_>,
         buf: ReadBufCursor<'_>,
     ) -> Poll<std::io::Result<()>> {
+        // 使用 pin_as_deref_mut 辅助函数来安全地解除双重 Pin
         pin_as_deref_mut(self).poll_read(cx, buf)
     }
 }
 
+// ========== Write trait 的委托实现宏 ==========
+
+/// 为实现了 `Deref` 的包装类型生成 `Write` 的完整委托实现。
+///
+/// 包含所有五个 Write trait 方法的委托。
 macro_rules! deref_async_write {
     () => {
         fn poll_write(
@@ -453,14 +551,17 @@ macro_rules! deref_async_write {
     };
 }
 
+/// 为 `Box<T>` 实现 `Write`——将所有写入操作委托给内部类型
 impl<T: ?Sized + Write + Unpin> Write for Box<T> {
     deref_async_write!();
 }
 
+/// 为 `&mut T` 实现 `Write`——将所有写入操作委托给内部类型
 impl<T: ?Sized + Write + Unpin> Write for &mut T {
     deref_async_write!();
 }
 
+/// 为 `Pin<P>` 实现 `Write`——处理双重 Pin 的情况
 impl<P> Write for Pin<P>
 where
     P: DerefMut,
@@ -495,10 +596,20 @@ where
     }
 }
 
-/// Polyfill for Pin::as_deref_mut()
-/// TODO: use Pin::as_deref_mut() instead once stabilized
+/// `Pin::as_deref_mut()` 的 polyfill（兼容实现）。
+///
+/// 由于 `Pin::as_deref_mut()` 尚未稳定（截至编写时），
+/// 此函数提供了等效功能：从 `Pin<&mut Pin<P>>` 安全地获取 `Pin<&mut P::Target>`。
+///
+/// TODO: 一旦 `Pin::as_deref_mut()` 稳定后，应替换为标准库版本。
+///
+/// # Safety
+///
+/// 直接从 `Pin<&mut Pin<P>>` 到 `Pin<&mut P::Target>`，
+/// 在此过程中不移动数据也不暴露 `&mut Pin<P>`。
+/// 详见 `Pin::as_deref_mut()` 的文档说明。
 fn pin_as_deref_mut<P: DerefMut>(pin: Pin<&mut Pin<P>>) -> Pin<&mut P::Target> {
-    // SAFETY: we go directly from Pin<&mut Pin<P>> to Pin<&mut P::Target>, without moving or
-    // giving out the &mut Pin<P> in the process. See Pin::as_deref_mut() for more detail.
+    // SAFETY: 我们直接从 Pin<&mut Pin<P>> 转到 Pin<&mut P::Target>，
+    // 过程中不移动数据也不暴露 &mut Pin<P>
     unsafe { pin.get_unchecked_mut() }.as_mut()
 }

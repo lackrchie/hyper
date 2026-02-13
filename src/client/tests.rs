@@ -1,3 +1,17 @@
+//! 客户端集成测试模块
+//!
+//! 本文件包含了 hyper 客户端的集成测试代码。目前所有测试用例均被注释掉，
+//! 因为它们基于旧版 futures 0.1 的 API（如 `poll_fn`、`try_ready!`、`Async`），
+//! 尚未迁移到 async/await 风格。
+//!
+//! 这些测试覆盖了以下场景：
+//! - 可重试请求（retryable_request）：验证当连接意外关闭时，请求可以通过新连接重试
+//! - 写入后连接重置（conn_reset_after_write）：验证在请求已写入但响应未返回时的错误处理
+//! - 连接池竞态（checkout_win_allows_connect_future_to_be_pooled）：验证连接池的竞态条件处理
+//! - HTTP/1 GET 请求基准测试（0 字节和 10 字节响应体）
+//!
+//! 当这些测试被重新实现后，它们将成为验证客户端核心行为正确性的重要保障。
+
 /*
 // FIXME: re-implement tests with `async/await`
 #[test]

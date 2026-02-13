@@ -1,3 +1,22 @@
+//! 测试用 Mock（模拟）对象模块
+//!
+//! 本模块包含用于 hyper 内部测试的 mock 实现。这些 mock 对象模拟网络 I/O 行为，
+//! 使得在单元测试中无需建立实际的网络连接即可测试 HTTP 协议的处理逻辑。
+//!
+//! ## 在 hyper 中的角色
+//!
+//! 本模块仅在 `#[cfg(test)]` 时编译，提供诸如 `Duplex`（双向通道）和
+//! `MockConnector`（模拟连接器）等测试工具。这些工具允许测试代码控制
+//! 模拟的读写数据和连接行为。
+//!
+//! ## 当前状态
+//!
+//! 本文件中的所有代码目前都被注释掉（包裹在 `/* ... */` 中），
+//! 标记为 "FIXME: re-implement tests with `async/await`"。
+//! 这是因为 hyper 从基于 futures 0.1 的同步风格迁移到了 async/await 异步风格，
+//! 原有的 mock 实现需要重写以适配新的异步 API。
+//! 当前的测试基础设施已迁移到使用 `tokio-test` 等更现代的测试工具。
+
 // FIXME: re-implement tests with `async/await`
 /*
 #[cfg(feature = "runtime")]

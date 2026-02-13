@@ -1,9 +1,17 @@
-//! HTTP Server
-//!
-//! A "server" is usually created by listening on a port for new connections,
-//! parse HTTP requests, and hand them off to a `Service`.
-//!
-//! How exactly you choose to listen for connections is not something hyper
-//! concerns itself with. After you have a connection, you can handle HTTP over
-//! it with the types in the [`conn`] module.
+// ============================================================================
+// HTTP 服务器模块
+// ============================================================================
+// "服务器"通常通过监听端口接受新连接、解析 HTTP 请求，
+// 并将请求交给 `Service` 处理来创建。
+//
+// 如何监听连接不是 hyper 关心的事情。一旦你有了连接，
+// 就可以使用 [`conn`] 模块中的类型来处理其上的 HTTP 通信。
+//
+// 设计理念：
+// hyper 只负责 HTTP 协议层面的处理，不绑定具体的传输层实现。
+// 用户可以自由选择 TCP、Unix socket 等方式监听连接。
+// ============================================================================
+
+/// 服务器连接模块。
+/// 提供 HTTP/1 和 HTTP/2 的连接处理 API。
 pub mod conn;
